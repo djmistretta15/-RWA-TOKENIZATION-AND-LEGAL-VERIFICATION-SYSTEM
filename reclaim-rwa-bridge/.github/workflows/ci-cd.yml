@@ -1,0 +1,774 @@
+name: RWA Tokenization CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop, 'release/**']
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 0 * * *' # Daily security scan
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      network:
+        description: 'Target network'
+        required: true
+        default: 'sepolia'
+        type: choice
+        options:
+          - sepolia
+          - goerli
+          - mainnet
+          - arbitrum
+          - optimism
+          - polygon
+          - base
+
+env:
+  NODE_VERSION: '18.x'
+  SOLIDITY_VERSION: '0.8.20'
+  COVERAGE_THRESHOLD: 85
+  GAS_REPORT: true
+
+jobs:
+  # ============================================
+  # STAGE 1: Code Quality & Linting
+  # ============================================
+  lint:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+        continue-on-error: false
+
+      - name: Run Prettier check
+        run: npm run format:check
+
+      - name: Run Solhint (Solidity linting)
+        run: npx solhint 'contracts/**/*.sol'
+
+      - name: Check for console.log in contracts
+        run: |
+          if grep -r "console.log" contracts/; then
+            echo "::error::console.log found in contracts"
+            exit 1
+          fi
+
+      - name: Validate JSON schemas
+        run: npm run validate:schemas
+
+  # ============================================
+  # STAGE 2: Smart Contract Compilation
+  # ============================================
+  compile:
+    name: Compile Contracts
+    runs-on: ubuntu-latest
+    needs: lint
+    outputs:
+      artifact-path: ${{ steps.upload.outputs.artifact-path }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile Solidity contracts
+        run: npx hardhat compile
+        env:
+          REPORT_GAS: ${{ env.GAS_REPORT }}
+
+      - name: Check contract sizes
+        run: npx hardhat size-contracts
+
+      - name: Verify ABI compatibility
+        run: npm run verify:abi
+
+      - name: Generate TypeChain bindings
+        run: npx hardhat typechain
+
+      - name: Upload compilation artifacts
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-artifacts
+          path: |
+            artifacts/
+            typechain-types/
+            cache/
+          retention-days: 7
+
+  # ============================================
+  # STAGE 3: Unit Testing
+  # ============================================
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: compile
+    strategy:
+      matrix:
+        test-suite:
+          - notary
+          - legalWrapper
+          - redemptionFlow
+          - liquidityVault
+          - oracleConsensus
+          - freezeMechanisms
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifacts
+
+      - name: Run ${{ matrix.test-suite }} tests
+        run: npx hardhat test tests/${{ matrix.test-suite }}.test.ts
+        env:
+          REPORT_GAS: true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.test-suite }}
+          path: test-results/
+          retention-days: 7
+
+  # ============================================
+  # STAGE 4: Integration Testing
+  # ============================================
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: test-unit
+    services:
+      hardhat-node:
+        image: node:18
+        ports:
+          - 8545:8545
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifacts
+
+      - name: Start local Hardhat node
+        run: npx hardhat node &
+        env:
+          HARDHAT_NETWORK: localhost
+
+      - name: Wait for node to be ready
+        run: |
+          timeout 30 bash -c 'until curl -s http://localhost:8545 > /dev/null; do sleep 1; done'
+
+      - name: Deploy contracts to local network
+        run: npx hardhat run scripts/deploy.ts --network localhost
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Run E2E scenarios
+        run: npm run test:e2e
+
+      - name: Test cross-contract interactions
+        run: npx hardhat test tests/integration/*.test.ts
+
+  # ============================================
+  # STAGE 5: Code Coverage
+  # ============================================
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    needs: compile
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run coverage
+        run: npx hardhat coverage
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+          if (( $(echo "$COVERAGE < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) )); then
+            echo "::error::Coverage ${COVERAGE}% is below threshold ${{ env.COVERAGE_THRESHOLD }}%"
+            exit 1
+          fi
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/lcov.info
+          flags: contracts
+          name: rwa-tokenization-coverage
+
+  # ============================================
+  # STAGE 6: Security Analysis
+  # ============================================
+  security-scan:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    needs: compile
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Slither
+        run: pip3 install slither-analyzer
+
+      - name: Run Slither static analysis
+        run: |
+          slither . --json slither-report.json || true
+          python3 scripts/parse-slither.py slither-report.json
+
+      - name: Run Mythril security analysis
+        uses: mythril-dev/mythril@master
+        with:
+          args: analyze contracts/*.sol --solc-json mythril.config.json
+
+      - name: Check for known vulnerabilities
+        run: npm audit --audit-level=high
+
+      - name: OWASP dependency check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'RWA-Tokenization'
+          path: '.'
+          format: 'HTML'
+
+      - name: Check for reentrancy vulnerabilities
+        run: |
+          if ! grep -r "nonReentrant" contracts/*.sol; then
+            echo "::warning::Some contracts may be missing reentrancy guards"
+          fi
+
+      - name: Verify access control patterns
+        run: |
+          npm run security:access-control
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            slither-report.json
+            mythril-report/
+          retention-days: 90
+
+  # ============================================
+  # STAGE 7: Gas Optimization Analysis
+  # ============================================
+  gas-analysis:
+    name: Gas Optimization
+    runs-on: ubuntu-latest
+    needs: test-unit
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifacts
+
+      - name: Run gas reporter
+        run: npx hardhat test --gas-reporter
+        env:
+          REPORT_GAS: true
+          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
+
+      - name: Compare gas usage with baseline
+        run: npm run gas:compare
+
+      - name: Check for gas regressions
+        run: |
+          npm run gas:check-regression
+          if [ $? -ne 0 ]; then
+            echo "::warning::Gas regression detected"
+          fi
+
+      - name: Upload gas report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gas-report
+          path: gas-report.txt
+          retention-days: 30
+
+  # ============================================
+  # STAGE 8: Formal Verification
+  # ============================================
+  formal-verification:
+    name: Formal Verification
+    runs-on: ubuntu-latest
+    needs: compile
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Certora Prover
+        run: pip3 install certora-cli
+
+      - name: Run Certora formal verification
+        run: |
+          certoraRun contracts/RWAToken.sol \
+            --verify RWAToken:specs/RWAToken.spec \
+            --solc solc8.20
+        env:
+          CERTORAKEY: ${{ secrets.CERTORA_KEY }}
+
+      - name: Verify invariants
+        run: npm run verify:invariants
+
+  # ============================================
+  # STAGE 9: Documentation Generation
+  # ============================================
+  documentation:
+    name: Generate Documentation
+    runs-on: ubuntu-latest
+    needs: compile
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate NatSpec documentation
+        run: npx hardhat docgen
+
+      - name: Generate TypeDoc
+        run: npx typedoc
+
+      - name: Generate API documentation
+        run: npm run docs:api
+
+      - name: Upload documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: docs/generated/
+          retention-days: 30
+
+  # ============================================
+  # STAGE 10: Staging Deployment
+  # ============================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [test-integration, security-scan, coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.rwa-tokenization.app
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifacts
+
+      - name: Configure deployment
+        run: |
+          echo "NETWORK=sepolia" >> $GITHUB_ENV
+          echo "DEPLOYMENT_ENV=staging" >> $GITHUB_ENV
+
+      - name: Deploy to Sepolia
+        run: npx hardhat run scripts/deploy.ts --network sepolia
+        env:
+          PRIVATE_KEY: ${{ secrets.STAGING_DEPLOYER_PRIVATE_KEY }}
+          INFURA_API_KEY: ${{ secrets.INFURA_API_KEY }}
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+
+      - name: Verify contracts on Etherscan
+        run: npx hardhat verify:all --network sepolia
+
+      - name: Run post-deployment tests
+        run: npm run test:post-deploy
+
+      - name: Update deployment registry
+        run: npm run registry:update
+
+      - name: Notify deployment success
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Staging deployment successful!'
+            })
+
+  # ============================================
+  # STAGE 11: Production Deployment
+  # ============================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test-integration, security-scan, coverage, formal-verification]
+    if: |
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/heads/release/')
+    environment:
+      name: production
+      url: https://rwa-tokenization.app
+    concurrency:
+      group: production-deployment
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifacts
+
+      - name: Validate production readiness
+        run: npm run validate:production
+
+      - name: Check deployment prerequisites
+        run: |
+          npm run check:multisig-ready
+          npm run check:timelock-configured
+          npm run check:emergency-procedures
+
+      - name: Create deployment plan
+        run: npm run deploy:plan --network mainnet
+
+      - name: Deploy with timelock
+        run: |
+          npx hardhat run scripts/deploy-production.ts --network mainnet
+        env:
+          PRIVATE_KEY: ${{ secrets.PRODUCTION_DEPLOYER_PRIVATE_KEY }}
+          INFURA_API_KEY: ${{ secrets.INFURA_API_KEY }}
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+          REQUIRE_MULTISIG: true
+
+      - name: Verify contracts
+        run: npx hardhat verify:all --network mainnet
+
+      - name: Configure monitoring
+        run: npm run monitoring:configure
+
+      - name: Update production registry
+        run: npm run registry:update --env production
+
+      - name: Create release tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = require('./package.json').version;
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/v${version}`,
+              sha: context.sha
+            });
+
+      - name: Notify stakeholders
+        run: npm run notify:deployment-complete
+
+  # ============================================
+  # STAGE 12: Multi-Chain Deployment
+  # ============================================
+  deploy-multichain:
+    name: Multi-Chain Deployment
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: |
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/heads/release/')
+    strategy:
+      matrix:
+        network:
+          - arbitrum
+          - optimism
+          - polygon
+          - base
+      max-parallel: 2
+    environment:
+      name: production-${{ matrix.network }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-artifacts
+
+      - name: Deploy to ${{ matrix.network }}
+        run: |
+          npx hardhat run scripts/deploy.ts --network ${{ matrix.network }}
+        env:
+          PRIVATE_KEY: ${{ secrets[format('{0}_DEPLOYER_PRIVATE_KEY', matrix.network)] }}
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+
+      - name: Configure cross-chain bridge
+        run: npm run bridge:configure --network ${{ matrix.network }}
+
+      - name: Verify deployment
+        run: npm run verify:deployment --network ${{ matrix.network }}
+
+  # ============================================
+  # STAGE 13: Post-Deployment Monitoring
+  # ============================================
+  monitoring:
+    name: Setup Monitoring
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Datadog monitoring
+        run: |
+          npm run monitoring:datadog:setup
+        env:
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+
+      - name: Configure PagerDuty alerts
+        run: |
+          npm run alerts:pagerduty:setup
+        env:
+          PAGERDUTY_API_KEY: ${{ secrets.PAGERDUTY_API_KEY }}
+
+      - name: Setup Tenderly monitoring
+        run: |
+          npm run monitoring:tenderly:setup
+        env:
+          TENDERLY_ACCESS_KEY: ${{ secrets.TENDERLY_ACCESS_KEY }}
+
+      - name: Configure OpenZeppelin Defender
+        run: |
+          npm run defender:setup
+        env:
+          DEFENDER_API_KEY: ${{ secrets.DEFENDER_API_KEY }}
+          DEFENDER_SECRET_KEY: ${{ secrets.DEFENDER_SECRET_KEY }}
+
+      - name: Setup custom metrics
+        run: npm run metrics:custom:setup
+
+      - name: Test alert routing
+        run: npm run alerts:test
+
+  # ============================================
+  # STAGE 14: Compliance Reporting
+  # ============================================
+  compliance-report:
+    name: Generate Compliance Report
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate SOC2 compliance evidence
+        run: npm run compliance:soc2
+
+      - name: Generate SEC regulatory report
+        run: npm run compliance:sec
+
+      - name: Generate audit trail report
+        run: npm run compliance:audit-trail
+
+      - name: Generate KYC/AML compliance report
+        run: npm run compliance:kyc-aml
+
+      - name: Upload compliance reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-reports
+          path: reports/compliance/
+          retention-days: 365
+
+      - name: Notify compliance team
+        run: npm run notify:compliance-team
+
+  # ============================================
+  # Scheduled Jobs
+  # ============================================
+  daily-health-check:
+    name: Daily Health Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check contract health
+        run: npm run health:contracts
+
+      - name: Verify oracle feeds
+        run: npm run health:oracles
+
+      - name: Check sync status
+        run: npm run health:sync
+
+      - name: Validate liquidity pools
+        run: npm run health:liquidity
+
+      - name: Security vulnerability scan
+        run: npm audit
+
+      - name: Generate daily report
+        run: npm run report:daily
+
+      - name: Notify if issues found
+        if: failure()
+        run: npm run notify:oncall

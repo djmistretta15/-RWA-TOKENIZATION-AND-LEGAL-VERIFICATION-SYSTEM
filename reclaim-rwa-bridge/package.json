@@ -1,0 +1,156 @@
+{
+  "name": "@reclaim/rwa-bridge",
+  "version": "1.0.0",
+  "description": "AI-Grade Real-World Asset Tokenization and Legal Verification System",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "compile": "hardhat compile",
+    "build": "npm run compile && tsc",
+    "test": "hardhat test",
+    "test:coverage": "hardhat coverage",
+    "test:gas": "REPORT_GAS=true hardhat test",
+    "test:fork": "FORK_MAINNET=true hardhat test",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "format": "prettier --write \"**/*.{ts,tsx,sol,json,md}\"",
+    "clean": "hardhat clean && rm -rf dist typechain-types",
+    "size": "hardhat size-contracts",
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
+    "deploy:goerli": "hardhat run scripts/deploy.ts --network goerli",
+    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
+    "deploy:mainnet": "hardhat run scripts/deploy.ts --network mainnet",
+    "deploy:arbitrum": "hardhat run scripts/deploy.ts --network arbitrum",
+    "deploy:optimism": "hardhat run scripts/deploy.ts --network optimism",
+    "deploy:base": "hardhat run scripts/deploy.ts --network base",
+    "deploy:polygon": "hardhat run scripts/deploy.ts --network polygon",
+    "verify": "hardhat verify",
+    "node": "hardhat node",
+    "console": "hardhat console",
+    "accounts": "hardhat accounts",
+    "typechain": "hardhat typechain",
+    "prepare": "husky install",
+    "slither": "slither . --config-file slither.config.json",
+    "mythril": "myth analyze contracts/*.sol",
+    "audit": "npm run slither && npm run mythril"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reclaim-protocol/rwa-bridge.git"
+  },
+  "keywords": [
+    "rwa",
+    "tokenization",
+    "real-world-assets",
+    "erc-1400",
+    "erc-4626",
+    "security-token",
+    "blockchain",
+    "ethereum",
+    "solidity",
+    "legal-compliance",
+    "spv",
+    "llc",
+    "kyc",
+    "aml",
+    "oracle",
+    "defi"
+  ],
+  "author": "Reclaim Protocol Team",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/reclaim-protocol/rwa-bridge/issues"
+  },
+  "homepage": "https://github.com/reclaim-protocol/rwa-bridge#readme",
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.1",
+    "@openzeppelin/contracts-upgradeable": "^5.0.1",
+    "ethers": "^6.10.0",
+    "zod": "^3.22.4",
+    "axios": "^1.6.5",
+    "arweave": "^1.14.4",
+    "ipfs-http-client": "^60.0.1",
+    "@pinata/sdk": "^2.1.0",
+    "web3.storage": "^4.5.5",
+    "crypto-js": "^4.2.0",
+    "uuid": "^9.0.1",
+    "winston": "^3.11.0",
+    "node-cron": "^3.0.3",
+    "bull": "^4.12.2",
+    "ioredis": "^5.3.2"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.3",
+    "@nomicfoundation/hardhat-ethers": "^3.0.5",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.10",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.3",
+    "@openzeppelin/hardhat-upgrades": "^3.0.1",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.5",
+    "@types/uuid": "^9.0.7",
+    "@types/crypto-js": "^4.2.1",
+    "@types/node-cron": "^3.0.11",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "chai": "^4.4.1",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.1.3",
+    "hardhat": "^2.19.4",
+    "hardhat-contract-sizer": "^2.10.0",
+    "hardhat-gas-reporter": "^1.0.9",
+    "husky": "^8.0.3",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.2.4",
+    "prettier-plugin-solidity": "^1.3.1",
+    "solhint": "^4.1.1",
+    "solidity-coverage": "^0.8.5",
+    "ts-node": "^10.9.2",
+    "typechain": "^8.3.2",
+    "typescript": "^5.3.3",
+    "dotenv": "^16.3.2",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss": "^3.4.1"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.sol": [
+      "prettier --write",
+      "solhint"
+    ],
+    "*.{json,md}": [
+      "prettier --write"
+    ]
+  },
+  "husky": {
+    "hooks": {
+      "pre-commit": "lint-staged",
+      "commit-msg": "commitlint -E HUSKY_GIT_PARAMS"
+    }
+  },
+  "files": [
+    "dist",
+    "contracts",
+    "artifacts/contracts/**/*.json",
+    "typechain-types",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
